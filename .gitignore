@@ -1,0 +1,8 @@
+config.json
+credential.clixml
+login.log
+hidden-netprofile.txt
+Launch-NufeCampusMonitor.vbs
+*.tmp
+*.bak
+*.log
