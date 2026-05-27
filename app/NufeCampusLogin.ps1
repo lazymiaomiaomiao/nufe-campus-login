@@ -1,4 +1,4 @@
-﻿param(
+param(
     [switch]$Quiet,
     [switch]$ForceLogin
 )
@@ -59,6 +59,20 @@ function Get-PlainTextPassword {
         }
     }
 }
+
+function Get-PropertySafely {
+    param(
+        [psobject]$Object,
+        [string]$PropertyName,
+        $DefaultValue = $null
+    )
+
+    if ($null -ne $Object -and $null -ne $Object.PSObject -and $Object.PSObject.Properties.Name -contains $PropertyName) {
+        return $Object.$PropertyName
+    }
+    return $DefaultValue
+}
+
 
 function Get-WifiSnapshotOnce {
     $adapter = Get-NetAdapter -ErrorAction SilentlyContinue |
@@ -271,7 +285,9 @@ function Update-ConfigFromStatus {
         [psobject]$Status
     )
 
-    $account = @($Status.uid, $Status.AC) | Where-Object { $_ } | Select-Object -First 1
+    $uid = Get-PropertySafely -Object $Status -PropertyName 'uid'
+    $ac = Get-PropertySafely -Object $Status -PropertyName 'AC'
+    $account = @($uid, $ac) | Where-Object { $_ } | Select-Object -First 1
     if ($account -and $account -match '(@[^@]+)$') {
         $Config.lastKnownAccount = $account
         $Config.lastKnownSuffix = $Matches[1]
@@ -339,7 +355,8 @@ function Invoke-PortalLogin {
 function Test-IsOnlineResult {
     param([psobject]$Status)
 
-    return ($null -ne $Status) -and (([string]$Status.result -eq '1') -or ([string]$Status.result -eq 'ok'))
+    $result = Get-PropertySafely -Object $Status -PropertyName 'result'
+    return ($null -ne $result) -and (([string]$result -eq '1') -or ([string]$result -eq 'ok'))
 }
 
 try {
@@ -404,7 +421,9 @@ try {
 
     if ((-not $ForceLogin) -and (Test-IsOnlineResult -Status $status)) {
         Update-ConfigFromStatus -Config $config -Status $status
-        $account = @($status.uid, $status.AC) | Where-Object { $_ } | Select-Object -First 1
+        $uid = Get-PropertySafely -Object $status -PropertyName 'uid'
+        $ac = Get-PropertySafely -Object $status -PropertyName 'AC'
+        $account = @($uid, $ac) | Where-Object { $_ } | Select-Object -First 1
         Write-Log -Message ("Already online on '{0}' as '{1}'." -f $context.Ssid, $account)
         exit 0
     }
@@ -413,8 +432,11 @@ try {
     $loginAttempt = Invoke-PortalLogin -Context $context -Config $config -Credential $credential
     $loginResult = $loginAttempt.Result
 
-    if (([string]$loginResult.result -ne '1') -and ([string]$loginResult.result -ne 'ok')) {
-        $message = @($loginResult.msg, $loginResult.message) | Where-Object { $_ } | Select-Object -First 1
+    $resVal = Get-PropertySafely -Object $loginResult -PropertyName 'result'
+    if (([string]$resVal -ne '1') -and ([string]$resVal -ne 'ok')) {
+        $msgVal = Get-PropertySafely -Object $loginResult -PropertyName 'msg'
+        $messageVal = Get-PropertySafely -Object $loginResult -PropertyName 'message'
+        $message = @($msgVal, $messageVal) | Where-Object { $_ } | Select-Object -First 1
         if (-not $message) {
             $message = 'Unknown login failure'
         }
@@ -425,7 +447,9 @@ try {
     $statusAfter = Get-DrcomStatus -Context $context -Config $config
     if (Test-IsOnlineResult -Status $statusAfter) {
         Update-ConfigFromStatus -Config $config -Status $statusAfter
-        $account = @($statusAfter.uid, $statusAfter.AC) | Where-Object { $_ } | Select-Object -First 1
+        $uidAfter = Get-PropertySafely -Object $statusAfter -PropertyName 'uid'
+        $acAfter = Get-PropertySafely -Object $statusAfter -PropertyName 'AC'
+        $account = @($uidAfter, $acAfter) | Where-Object { $_ } | Select-Object -First 1
         Write-Log -Message ("Portal login succeeded on '{0}' as '{1}'." -f $context.Ssid, $account)
         exit 0
     }
@@ -434,6 +458,7 @@ try {
     exit 0
 }
 catch {
-    Write-Log -Level 'ERROR' -Message $_.Exception.Message
+    $errMessage = if ($_.Exception) { $_.Exception.Message } else { $_.ToString() }
+    Write-Log -Level 'ERROR' -Message $errMessage
     exit 1
 }
