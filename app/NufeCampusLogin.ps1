@@ -73,6 +73,36 @@ function Get-PropertySafely {
     return $DefaultValue
 }
 
+function Get-ConnectedWifiSsid {
+    param([string]$InterfaceName)
+
+    try {
+        $raw = & netsh.exe wlan show interfaces 2>&1
+        $inTargetInterface = -not $InterfaceName
+        $sawInterfaceName = $false
+
+        foreach ($line in $raw) {
+            if ($line -match '^\s*Name\s*:\s*(.+?)\s*$') {
+                $sawInterfaceName = $true
+                $inTargetInterface = (-not $InterfaceName) -or ($Matches[1].Trim() -eq $InterfaceName)
+                continue
+            }
+
+            if ((-not $sawInterfaceName -or $inTargetInterface) -and
+                $line -match '^\s*SSID\s*:\s*(.+?)\s*$' -and
+                $line -notmatch '^\s*BSSID\s*:') {
+                $ssid = $Matches[1].Trim()
+                if ($ssid -and $ssid -ne 'N/A') {
+                    return $ssid
+                }
+            }
+        }
+    }
+    catch {
+    }
+
+    return ''
+}
 
 function Get-WifiSnapshotOnce {
     $adapter = Get-NetAdapter -ErrorAction SilentlyContinue |
@@ -88,16 +118,18 @@ function Get-WifiSnapshotOnce {
     }
 
     $profile = Get-NetConnectionProfile -InterfaceAlias $adapter.Name -ErrorAction SilentlyContinue
+    $wifiSsid = Get-ConnectedWifiSsid -InterfaceName $adapter.Name
     $ipv4 = Get-NetIPAddress -InterfaceAlias $adapter.Name -AddressFamily IPv4 -ErrorAction SilentlyContinue |
         Where-Object { $_.IPAddress -and $_.IPAddress -notmatch '^169\.254\.' } |
         Select-Object -First 1 -ExpandProperty IPAddress
 
     [pscustomobject]@{
-        InterfaceName = $adapter.Name
-        State         = [string]$adapter.Status
-        Ssid          = if ($profile) { [string]$profile.Name } else { '' }
-        Mac           = (($adapter.MacAddress -replace '[:-]', '').ToLowerInvariant())
-        IPv4          = $ipv4
+        InterfaceName      = $adapter.Name
+        State              = [string]$adapter.Status
+        Ssid               = $wifiSsid
+        NetworkProfileName = if ($profile) { [string]$profile.Name } else { '' }
+        Mac                = (($adapter.MacAddress -replace '[:-]', '').ToLowerInvariant())
+        IPv4               = $ipv4
     }
 }
 
@@ -168,7 +200,23 @@ function Repair-LightNetwork {
 
     if ($InterfaceName) {
         try {
-            & ipconfig.exe /renew $InterfaceName | Out-Null
+            $renewJob = Start-Job -ScriptBlock {
+                param([string]$Name)
+                & ipconfig.exe /renew $Name | Out-Null
+            } -ArgumentList $InterfaceName
+
+            try {
+                if (-not (Wait-Job -Job $renewJob -Timeout 20)) {
+                    Stop-Job -Job $renewJob -Force -ErrorAction SilentlyContinue
+                    throw "DHCP renew timed out after 20 seconds."
+                }
+
+                Receive-Job -Job $renewJob | Out-Null
+            }
+            finally {
+                Remove-Job -Job $renewJob -Force -ErrorAction SilentlyContinue
+            }
+
             Write-Log -Message ("Requested DHCP renew for interface '{0}'." -f $InterfaceName)
         }
         catch {
@@ -203,12 +251,19 @@ function Connect-TargetWifi {
         Write-Log -Message $connectOutput
     }
 
+    Write-Log -Message ("Waiting for Wi-Fi context on '{0}'." -f $Config.ssid)
+
     for ($attempt = 1; $attempt -le 20; $attempt++) {
         Start-Sleep -Seconds 2
         $context = Read-WifiContextOnce
         if ($context -and $context.Ssid -eq $Config.ssid) {
             return $context
         }
+    }
+
+    $latest = Get-WifiSnapshotOnce
+    if ($latest) {
+        Write-Log -Level 'WARN' -Message ("Wi-Fi did not become ready as '{0}' after waiting. Latest state: '{1}', SSID: '{2}', network profile: '{3}', IPv4: '{4}'." -f $Config.ssid, $latest.State, $latest.Ssid, $latest.NetworkProfileName, $latest.IPv4)
     }
 
     Repair-LightNetwork -InterfaceName $interfaceName
